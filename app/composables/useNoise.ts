@@ -1,7 +1,10 @@
-// Generates noise with EQ baked in and plays it back via a plain <audio loop>
-// element. This is the only reliable way to keep audio playing while a PWA is
-// backgrounded on iOS — AudioContext is suspended, but <audio> elements with a
-// real (or blob) URL keep going.
+// Generates noise with EQ baked into a WAV buffer, then plays it back via two
+// alternating <audio> elements. The handoff approach exists because iOS Safari
+// inserts a small gap when looping an <audio> element via the `loop` attribute.
+// Two elements with `ended`-event handoff plus pre-scheduled start of the
+// other element while the current one is still playing gives gapless playback
+// — and crucially keeps audio alive while the PWA is backgrounded on iOS,
+// since AudioContext gets suspended but plain <audio> playback does not.
 
 export type NoiseType = 'white' | 'pink' | 'brown'
 
@@ -124,7 +127,6 @@ function audioBufferToWav(buffer: AudioBuffer): Blob {
   writeStr('data')
   writeU32(dataSize)
 
-  // Interleave channels
   const chans: Float32Array[] = []
   for (let ch = 0; ch < numCh; ch++) chans.push(buffer.getChannelData(ch))
   for (let i = 0; i < numFrames; i++) {
@@ -151,25 +153,45 @@ export function useNoise() {
   const playing = ref(false)
   const rendering = ref(false)
 
-  let audioEl: HTMLAudioElement | null = null
+  // Two audio elements, handed off via `ended` to mask the iOS Safari loop gap.
+  let elA: HTMLAudioElement | null = null
+  let elB: HTMLAudioElement | null = null
+  let current: HTMLAudioElement | null = null
   let currentUrl: string | null = null
   let renderToken = 0
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
-  const SAMPLE_RATE = 44100
-  const DURATION = 8 // seconds, loops seamlessly enough for noise
 
-  function ensureAudioEl() {
-    if (audioEl) return audioEl
+  const SAMPLE_RATE = 44100
+  const DURATION = 20 // seconds per buffer; longer = fewer handoffs
+
+  function makeEl(): HTMLAudioElement {
     const el = new Audio()
-    el.loop = true
     el.preload = 'auto'
-    el.crossOrigin = 'anonymous'
-    // playsinline equivalent attributes
     el.setAttribute('playsinline', '')
     el.setAttribute('webkit-playsinline', '')
     el.volume = volume.value
-    audioEl = el
     return el
+  }
+
+  function ensureElements() {
+    if (elA && elB) return
+    elA = makeEl()
+    elB = makeEl()
+    const onEndedFrom = (ended: HTMLAudioElement) => {
+      if (!playing.value) return
+      const next = ended === elA ? elB! : elA!
+      next.currentTime = 0
+      next.play().catch(() => { /* gesture/state issues handled by start() */ })
+      current = next
+    }
+    elA.addEventListener('ended', () => onEndedFrom(elA!))
+    elB.addEventListener('ended', () => onEndedFrom(elB!))
+  }
+
+  function applySrc(url: string) {
+    ensureElements()
+    elA!.src = url
+    elB!.src = url
   }
 
   async function renderNow() {
@@ -180,16 +202,16 @@ export function useNoise() {
         { type: type.value, durationSec: DURATION, sampleRate: SAMPLE_RATE },
         { low: { ...eq.low }, mid: { ...eq.mid }, high: { ...eq.high } }
       )
-      if (token !== renderToken) return // a newer render started, drop this one
+      if (token !== renderToken) return
       const blob = audioBufferToWav(buf)
       const url = URL.createObjectURL(blob)
-      const el = ensureAudioEl()
-      const wasPlaying = playing.value
       const prevUrl = currentUrl
-      el.src = url
+      const wasPlaying = playing.value
+      applySrc(url)
       currentUrl = url
       if (wasPlaying) {
-        try { await el.play() } catch { /* user-gesture issues handled at start */ }
+        const el = current ?? elA!
+        try { await el.play() } catch { /* will be retried by start() */ }
       }
       if (prevUrl) URL.revokeObjectURL(prevUrl)
     } finally {
@@ -206,13 +228,14 @@ export function useNoise() {
   }
 
   async function start() {
-    const el = ensureAudioEl()
-    if (!currentUrl) {
-      await renderNow()
-    }
-    el.volume = volume.value
+    ensureElements()
+    if (!currentUrl) await renderNow()
+    elA!.volume = volume.value
+    elB!.volume = volume.value
+    current = elA
+    elA!.currentTime = 0
     try {
-      await el.play()
+      await elA!.play()
       playing.value = true
     } catch (err) {
       console.warn('play() failed', err)
@@ -221,11 +244,12 @@ export function useNoise() {
   }
 
   function stop() {
-    if (audioEl) {
-      audioEl.pause()
-      audioEl.currentTime = 0
-    }
     playing.value = false
+    elA?.pause()
+    elB?.pause()
+    if (elA) elA.currentTime = 0
+    if (elB) elB.currentTime = 0
+    current = null
   }
 
   async function toggle() {
@@ -246,17 +270,20 @@ export function useNoise() {
 
   function setVolume(v: number) {
     volume.value = v
-    if (audioEl) audioEl.volume = v
+    if (elA) elA.volume = v
+    if (elB) elB.volume = v
   }
 
-  // Cleanup
   onScopeDispose(() => {
     if (pendingTimer) clearTimeout(pendingTimer)
-    if (audioEl) {
-      audioEl.pause()
-      audioEl.src = ''
-      audioEl = null
+    for (const el of [elA, elB]) {
+      if (!el) continue
+      el.pause()
+      el.src = ''
     }
+    elA = null
+    elB = null
+    current = null
     if (currentUrl) {
       URL.revokeObjectURL(currentUrl)
       currentUrl = null
