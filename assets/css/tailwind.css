@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+  background: #0a0a0a;
+  color: #f4f4f5;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  overscroll-behavior: none;
+}
+
+body {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  width: 100%;
+}
+
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  background: #27272a;
+  border-radius: 2px;
+}
+
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 24px;
+  width: 24px;
+  border-radius: 9999px;
+  background: #f4f4f5;
+  margin-top: -10px;
+  cursor: pointer;
+}
+
+input[type='range']::-moz-range-track {
+  height: 4px;
+  background: #27272a;
+  border-radius: 2px;
+}
+
+input[type='range']::-moz-range-thumb {
+  height: 24px;
+  width: 24px;
+  border-radius: 9999px;
+  background: #f4f4f5;
+  border: none;
+  cursor: pointer;
+}
