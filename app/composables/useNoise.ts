@@ -165,6 +165,7 @@ export function useNoise() {
   let renderToken = 0
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
   let primed = false
+  let fadeRaf: number | null = null
 
   const SAMPLE_RATE = 44100
   const DURATION = 20
@@ -181,12 +182,44 @@ export function useNoise() {
     return el
   }
 
-  function handoffFrom(el: HTMLAudioElement) {
-    if (!playing.value || current !== el || !elA || !elB) return
-    const next = el === elA ? elB : elA
-    current = next
-    next.currentTime = 0
-    next.play().catch(() => { /* will retry on next event */ })
+  // Equal-power crossfade between two <audio> elements via rAF. cos/sin keeps
+  // the summed power constant for uncorrelated noise streams, so the overlap
+  // doesn't audibly swell. rAF is paused in iOS background — that's fine
+  // because handoff in background uses the no-fade `ended` path.
+  function crossfade(from: HTMLAudioElement, to: HTMLAudioElement, durationMs: number) {
+    if (fadeRaf !== null) cancelAnimationFrame(fadeRaf)
+    const start = performance.now()
+    const tick = () => {
+      if (!playing.value) { fadeRaf = null; return }
+      const peak = volume.value
+      const t = Math.min(1, (performance.now() - start) / durationMs)
+      from.volume = Math.cos(t * Math.PI / 2) * peak
+      to.volume = Math.sin(t * Math.PI / 2) * peak
+      if (t < 1) {
+        fadeRaf = requestAnimationFrame(tick)
+      } else {
+        from.pause()
+        from.currentTime = 0
+        from.volume = peak
+        fadeRaf = null
+      }
+    }
+    fadeRaf = requestAnimationFrame(tick)
+  }
+
+  function handoff(from: HTMLAudioElement, withFade: boolean) {
+    if (!playing.value || current !== from || !elA || !elB) return
+    const to = from === elA ? elB : elA
+    current = to
+    to.currentTime = 0
+    if (withFade) {
+      to.volume = 0
+      to.play().catch(() => { /* fallback on ended */ })
+      crossfade(from, to, OVERLAP_SEC * 1000)
+    } else {
+      to.volume = volume.value
+      to.play().catch(() => { /* fallback on next event */ })
+    }
   }
 
   function onTimeUpdate(el: HTMLAudioElement) {
@@ -194,7 +227,7 @@ export function useNoise() {
     const dur = el.duration
     if (!Number.isFinite(dur) || dur <= 0) return
     const remaining = dur - el.currentTime
-    if (remaining > 0 && remaining <= OVERLAP_SEC) handoffFrom(el)
+    if (remaining > 0 && remaining <= OVERLAP_SEC) handoff(el, true)
   }
 
   function ensureElements() {
@@ -203,8 +236,8 @@ export function useNoise() {
     elB = makeEl()
     elA.addEventListener('timeupdate', () => onTimeUpdate(elA!))
     elB.addEventListener('timeupdate', () => onTimeUpdate(elB!))
-    elA.addEventListener('ended', () => handoffFrom(elA!))
-    elB.addEventListener('ended', () => handoffFrom(elB!))
+    elA.addEventListener('ended', () => handoff(elA!, false))
+    elB.addEventListener('ended', () => handoff(elB!, false))
   }
 
   function applySrc(url: string) {
@@ -278,10 +311,14 @@ export function useNoise() {
 
   function stop() {
     playing.value = false
+    if (fadeRaf !== null) {
+      cancelAnimationFrame(fadeRaf)
+      fadeRaf = null
+    }
     elA?.pause()
     elB?.pause()
-    if (elA) elA.currentTime = 0
-    if (elB) elB.currentTime = 0
+    if (elA) { elA.currentTime = 0; elA.volume = volume.value }
+    if (elB) { elB.currentTime = 0; elB.volume = volume.value }
     current = null
   }
 
@@ -309,6 +346,7 @@ export function useNoise() {
 
   onScopeDispose(() => {
     if (pendingTimer) clearTimeout(pendingTimer)
+    if (fadeRaf !== null) cancelAnimationFrame(fadeRaf)
     for (const el of [elA, elB]) {
       if (!el) continue
       el.pause()
