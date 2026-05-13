@@ -142,6 +142,34 @@ function audioBufferToWav(buffer: AudioBuffer): Blob {
   return new Blob([ab], { type: 'audio/wav' })
 }
 
+const STORAGE_KEY = 'noise-gen:settings'
+
+interface StoredSettings {
+  type?: NoiseType
+  eq?: { low?: number; mid?: number; high?: number }
+  volume?: number
+}
+
+function loadStored(): StoredSettings | null {
+  if (typeof localStorage === 'undefined') return null
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    return raw ? (JSON.parse(raw) as StoredSettings) : null
+  } catch {
+    return null
+  }
+}
+
+function writeStored(s: StoredSettings) {
+  if (typeof localStorage === 'undefined') return
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)) } catch { /* quota / private mode */ }
+}
+
+function clampDb(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0
+  return Math.max(-12, Math.min(12, v))
+}
+
 export function useNoise() {
   const type = ref<NoiseType>('pink')
   const eq = reactive<EqState>({
@@ -157,6 +185,8 @@ export function useNoise() {
   let currentUrl: string | null = null
   let renderToken = 0
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  let resumeTimer: ReturnType<typeof setInterval> | null = null
 
   const SAMPLE_RATE = 44100
   const DURATION = 600 // 10 minutes
@@ -206,6 +236,29 @@ export function useNoise() {
     }, delay)
   }
 
+  // Try to resume after an audio session interruption (incoming call, etc.).
+  // iOS pauses the <audio> element when a call comes in and doesn't auto-
+  // resume when the call ends, even though the page is back in focus.
+  function tryResume() {
+    if (!audioEl || !playing.value) return
+    if (!audioEl.paused) return
+    audioEl.play().catch(() => { /* will retry on next trigger */ })
+  }
+
+  function startResumeWatchers() {
+    if (resumeTimer !== null) return
+    // Fast polling for foreground recovery — cheap and stops as soon as
+    // playback resumes successfully via tryResume's no-op when not paused.
+    resumeTimer = setInterval(tryResume, 1500)
+  }
+
+  function stopResumeWatchers() {
+    if (resumeTimer !== null) {
+      clearInterval(resumeTimer)
+      resumeTimer = null
+    }
+  }
+
   async function start() {
     const el = ensureEl()
     if (!currentUrl) await renderNow()
@@ -213,6 +266,7 @@ export function useNoise() {
     try {
       await el.play()
       playing.value = true
+      startResumeWatchers()
     } catch (err) {
       console.warn('play() failed', err)
       playing.value = false
@@ -220,6 +274,7 @@ export function useNoise() {
   }
 
   function stop() {
+    stopResumeWatchers()
     audioEl?.pause()
     if (audioEl) audioEl.currentTime = 0
     playing.value = false
@@ -246,8 +301,53 @@ export function useNoise() {
     if (audioEl) audioEl.volume = v
   }
 
+  function scheduleSave() {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = setTimeout(() => {
+      saveTimer = null
+      writeStored({
+        type: type.value,
+        eq: { low: eq.low.gain, mid: eq.mid.gain, high: eq.high.gain },
+        volume: volume.value
+      })
+    }, 250)
+  }
+
+  onMounted(() => {
+    const stored = loadStored()
+    if (stored) {
+      if (stored.type === 'white' || stored.type === 'pink' || stored.type === 'brown') {
+        type.value = stored.type
+      }
+      if (stored.eq) {
+        eq.low.gain  = clampDb(stored.eq.low)
+        eq.mid.gain  = clampDb(stored.eq.mid)
+        eq.high.gain = clampDb(stored.eq.high)
+      }
+      if (typeof stored.volume === 'number' && stored.volume >= 0 && stored.volume <= 1) {
+        volume.value = stored.volume
+      }
+    }
+
+    watch(
+      [type, () => eq.low.gain, () => eq.mid.gain, () => eq.high.gain, volume],
+      scheduleSave
+    )
+
+    document.addEventListener('visibilitychange', tryResume)
+    window.addEventListener('focus', tryResume)
+    window.addEventListener('pageshow', tryResume)
+  })
+
   onScopeDispose(() => {
     if (pendingTimer) clearTimeout(pendingTimer)
+    if (saveTimer) clearTimeout(saveTimer)
+    stopResumeWatchers()
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', tryResume)
+      window.removeEventListener('focus', tryResume)
+      window.removeEventListener('pageshow', tryResume)
+    }
     if (audioEl) {
       audioEl.pause()
       audioEl.src = ''
