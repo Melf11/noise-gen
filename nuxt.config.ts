@@ -2,7 +2,6 @@
 export default defineNuxtConfig({
   compatibilityDate: '2025-01-01',
   devtools: { enabled: false },
-  ssr: false,
   modules: ['@nuxtjs/tailwindcss', '@vite-pwa/nuxt'],
 
   app: {
@@ -32,6 +31,12 @@ export default defineNuxtConfig({
 
   nitro: {
     preset: 'static'
+  },
+
+  css: ['~/assets/css/tailwind.css'],
+
+  tailwindcss: {
+    cssPath: ['~/assets/css/tailwind.css', { injectPosition: 'first' }]
   },
 
   pwa: {
