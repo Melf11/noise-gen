@@ -153,16 +153,24 @@ export function useNoise() {
   const playing = ref(false)
   const rendering = ref(false)
 
-  // Two audio elements, handed off via `ended` to mask the iOS Safari loop gap.
+  // Two audio elements. `ended` fires AFTER playback stops — too late for a
+  // seamless transition. Instead we use `timeupdate` to start the next element
+  // ~250 ms before the current ends; they overlap during the crossfade window.
+  // `ended` stays as a safety net in case timeupdate gets throttled (e.g. in
+  // background) and misses the window.
   let elA: HTMLAudioElement | null = null
   let elB: HTMLAudioElement | null = null
   let current: HTMLAudioElement | null = null
   let currentUrl: string | null = null
   let renderToken = 0
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
+  let primed = false
 
   const SAMPLE_RATE = 44100
-  const DURATION = 20 // seconds per buffer; longer = fewer handoffs
+  const DURATION = 20
+  // Window in which we kick off the next element while the current one is
+  // still playing. Must be ≥ typical timeupdate cadence (~250 ms in Safari).
+  const OVERLAP_SEC = 0.3
 
   function makeEl(): HTMLAudioElement {
     const el = new Audio()
@@ -173,19 +181,30 @@ export function useNoise() {
     return el
   }
 
+  function handoffFrom(el: HTMLAudioElement) {
+    if (!playing.value || current !== el || !elA || !elB) return
+    const next = el === elA ? elB : elA
+    current = next
+    next.currentTime = 0
+    next.play().catch(() => { /* will retry on next event */ })
+  }
+
+  function onTimeUpdate(el: HTMLAudioElement) {
+    if (!playing.value || current !== el) return
+    const dur = el.duration
+    if (!Number.isFinite(dur) || dur <= 0) return
+    const remaining = dur - el.currentTime
+    if (remaining > 0 && remaining <= OVERLAP_SEC) handoffFrom(el)
+  }
+
   function ensureElements() {
     if (elA && elB) return
     elA = makeEl()
     elB = makeEl()
-    const onEndedFrom = (ended: HTMLAudioElement) => {
-      if (!playing.value) return
-      const next = ended === elA ? elB! : elA!
-      next.currentTime = 0
-      next.play().catch(() => { /* gesture/state issues handled by start() */ })
-      current = next
-    }
-    elA.addEventListener('ended', () => onEndedFrom(elA!))
-    elB.addEventListener('ended', () => onEndedFrom(elB!))
+    elA.addEventListener('timeupdate', () => onTimeUpdate(elA!))
+    elB.addEventListener('timeupdate', () => onTimeUpdate(elB!))
+    elA.addEventListener('ended', () => handoffFrom(elA!))
+    elB.addEventListener('ended', () => handoffFrom(elB!))
   }
 
   function applySrc(url: string) {
@@ -232,6 +251,20 @@ export function useNoise() {
     if (!currentUrl) await renderNow()
     elA!.volume = volume.value
     elB!.volume = volume.value
+    // iOS unlock: a play() initiated outside a user gesture is normally
+    // blocked. We can prime elB inside this gesture so the timeupdate-driven
+    // handoff can start it later automatically.
+    if (!primed) {
+      try {
+        const savedVol = elB!.volume
+        elB!.volume = 0
+        await elB!.play()
+        elB!.pause()
+        elB!.currentTime = 0
+        elB!.volume = savedVol
+        primed = true
+      } catch { /* unlock isn't critical, ended handler will still fire */ }
+    }
     current = elA
     elA!.currentTime = 0
     try {
