@@ -55,10 +55,12 @@ function fillBrown(data: Float32Array) {
   }
 }
 
+const NUM_CHANNELS = 1 // mono: noise sounds nearly identical and halves blob size
+
 function createRawNoise(ctx: BaseAudioContext, opts: NoiseOptions) {
   const length = Math.floor(opts.durationSec * opts.sampleRate)
-  const buf = ctx.createBuffer(2, length, opts.sampleRate)
-  for (let ch = 0; ch < 2; ch++) {
+  const buf = ctx.createBuffer(NUM_CHANNELS, length, opts.sampleRate)
+  for (let ch = 0; ch < NUM_CHANNELS; ch++) {
     const data = buf.getChannelData(ch)
     if (opts.type === 'white') fillWhite(data)
     else if (opts.type === 'pink') fillPink(data)
@@ -69,7 +71,7 @@ function createRawNoise(ctx: BaseAudioContext, opts: NoiseOptions) {
 
 async function renderWithEq(opts: NoiseOptions, eq: EqState): Promise<AudioBuffer> {
   const length = Math.floor(opts.durationSec * opts.sampleRate)
-  const offline = new OfflineAudioContext(2, length, opts.sampleRate)
+  const offline = new OfflineAudioContext(NUM_CHANNELS, length, opts.sampleRate)
   const raw = createRawNoise(offline, opts)
 
   const src = offline.createBufferSource()
@@ -168,7 +170,7 @@ export function useNoise() {
   let fadeRaf: number | null = null
 
   const SAMPLE_RATE = 44100
-  const DURATION = 20
+  const DURATION = 600 // 10 minutes — loop seam is now rare enough to ignore
   // Window in which we kick off the next element while the current one is
   // still playing. Must be ≥ typical timeupdate cadence (~250 ms in Safari).
   const OVERLAP_SEC = 0.3
@@ -335,7 +337,9 @@ export function useNoise() {
 
   function setEq(band: keyof EqState, gain: number) {
     eq[band].gain = gain
-    scheduleRender(300)
+    // Long debounce — rendering 10 min takes a second or two on mobile, so we
+    // wait until the user has settled on a value before regenerating.
+    scheduleRender(800)
   }
 
   function setVolume(v: number) {
