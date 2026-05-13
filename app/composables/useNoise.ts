@@ -1,10 +1,8 @@
-// Generates noise with EQ baked into a WAV buffer, then plays it back via two
-// alternating <audio> elements. The handoff approach exists because iOS Safari
-// inserts a small gap when looping an <audio> element via the `loop` attribute.
-// Two elements with `ended`-event handoff plus pre-scheduled start of the
-// other element while the current one is still playing gives gapless playback
-// — and crucially keeps audio alive while the PWA is backgrounded on iOS,
-// since AudioContext gets suspended but plain <audio> playback does not.
+// Renders noise with EQ baked into a WAV buffer and plays it back via a plain
+// <audio loop>. iOS Safari suspends AudioContext when the PWA is backgrounded
+// but keeps <audio> elements running, so this is the path that survives
+// going to the home screen with the app installed. The buffer is 10 minutes
+// long, which makes Safari's tiny loop-rewind gap rare enough to ignore.
 
 export type NoiseType = 'white' | 'pink' | 'brown'
 
@@ -24,6 +22,8 @@ interface NoiseOptions {
   durationSec: number
   sampleRate: number
 }
+
+const NUM_CHANNELS = 1
 
 function fillWhite(data: Float32Array) {
   for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
@@ -54,8 +54,6 @@ function fillBrown(data: Float32Array) {
     data[i] = last * 3.5
   }
 }
-
-const NUM_CHANNELS = 1 // mono: noise sounds nearly identical and halves blob size
 
 function createRawNoise(ctx: BaseAudioContext, opts: NoiseOptions) {
   const length = Math.floor(opts.durationSec * opts.sampleRate)
@@ -120,7 +118,7 @@ function audioBufferToWav(buffer: AudioBuffer): Blob {
   writeStr('WAVE')
   writeStr('fmt ')
   writeU32(16)
-  writeU16(1)            // PCM
+  writeU16(1)
   writeU16(numCh)
   writeU32(sampleRate)
   writeU32(byteRate)
@@ -155,97 +153,24 @@ export function useNoise() {
   const playing = ref(false)
   const rendering = ref(false)
 
-  // Two audio elements. `ended` fires AFTER playback stops — too late for a
-  // seamless transition. Instead we use `timeupdate` to start the next element
-  // ~250 ms before the current ends; they overlap during the crossfade window.
-  // `ended` stays as a safety net in case timeupdate gets throttled (e.g. in
-  // background) and misses the window.
-  let elA: HTMLAudioElement | null = null
-  let elB: HTMLAudioElement | null = null
-  let current: HTMLAudioElement | null = null
+  let audioEl: HTMLAudioElement | null = null
   let currentUrl: string | null = null
   let renderToken = 0
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
-  let primed = false
-  let fadeRaf: number | null = null
 
   const SAMPLE_RATE = 44100
-  const DURATION = 600 // 10 minutes — loop seam is now rare enough to ignore
-  // Window in which we kick off the next element while the current one is
-  // still playing. Must be ≥ typical timeupdate cadence (~250 ms in Safari).
-  const OVERLAP_SEC = 0.3
+  const DURATION = 600 // 10 minutes
 
-  function makeEl(): HTMLAudioElement {
+  function ensureEl() {
+    if (audioEl) return audioEl
     const el = new Audio()
+    el.loop = true
     el.preload = 'auto'
     el.setAttribute('playsinline', '')
     el.setAttribute('webkit-playsinline', '')
     el.volume = volume.value
+    audioEl = el
     return el
-  }
-
-  // Equal-power crossfade between two <audio> elements via rAF. cos/sin keeps
-  // the summed power constant for uncorrelated noise streams, so the overlap
-  // doesn't audibly swell. rAF is paused in iOS background — that's fine
-  // because handoff in background uses the no-fade `ended` path.
-  function crossfade(from: HTMLAudioElement, to: HTMLAudioElement, durationMs: number) {
-    if (fadeRaf !== null) cancelAnimationFrame(fadeRaf)
-    const start = performance.now()
-    const tick = () => {
-      if (!playing.value) { fadeRaf = null; return }
-      const peak = volume.value
-      const t = Math.min(1, (performance.now() - start) / durationMs)
-      from.volume = Math.cos(t * Math.PI / 2) * peak
-      to.volume = Math.sin(t * Math.PI / 2) * peak
-      if (t < 1) {
-        fadeRaf = requestAnimationFrame(tick)
-      } else {
-        from.pause()
-        from.currentTime = 0
-        from.volume = peak
-        fadeRaf = null
-      }
-    }
-    fadeRaf = requestAnimationFrame(tick)
-  }
-
-  function handoff(from: HTMLAudioElement, withFade: boolean) {
-    if (!playing.value || current !== from || !elA || !elB) return
-    const to = from === elA ? elB : elA
-    current = to
-    to.currentTime = 0
-    if (withFade) {
-      to.volume = 0
-      to.play().catch(() => { /* fallback on ended */ })
-      crossfade(from, to, OVERLAP_SEC * 1000)
-    } else {
-      to.volume = volume.value
-      to.play().catch(() => { /* fallback on next event */ })
-    }
-  }
-
-  function onTimeUpdate(el: HTMLAudioElement) {
-    if (!playing.value || current !== el) return
-    const dur = el.duration
-    if (!Number.isFinite(dur) || dur <= 0) return
-    const remaining = dur - el.currentTime
-    if (remaining > 0 && remaining <= OVERLAP_SEC) handoff(el, true)
-  }
-
-  function ensureElements() {
-    if (elA && elB) return
-    elA = makeEl()
-    elB = makeEl()
-    elA.addEventListener('timeupdate', () => onTimeUpdate(elA!))
-    elB.addEventListener('timeupdate', () => onTimeUpdate(elB!))
-    elA.addEventListener('ended', () => handoff(elA!, false))
-    elB.addEventListener('ended', () => handoff(elB!, false))
-  }
-
-  function applySrc(url: string) {
-    ensureElements()
-    elA!.src = url
-    elB!.src = url
   }
 
   async function renderNow() {
@@ -259,13 +184,13 @@ export function useNoise() {
       if (token !== renderToken) return
       const blob = audioBufferToWav(buf)
       const url = URL.createObjectURL(blob)
-      const prevUrl = currentUrl
+      const el = ensureEl()
       const wasPlaying = playing.value
-      applySrc(url)
+      const prevUrl = currentUrl
+      el.src = url
       currentUrl = url
       if (wasPlaying) {
-        const el = current ?? elA!
-        try { await el.play() } catch { /* will be retried by start() */ }
+        try { await el.play() } catch { /* gesture issues handled by start() */ }
       }
       if (prevUrl) URL.revokeObjectURL(prevUrl)
     } finally {
@@ -273,7 +198,7 @@ export function useNoise() {
     }
   }
 
-  function scheduleRender(delay = 250) {
+  function scheduleRender(delay: number) {
     if (pendingTimer) clearTimeout(pendingTimer)
     pendingTimer = setTimeout(() => {
       pendingTimer = null
@@ -282,28 +207,11 @@ export function useNoise() {
   }
 
   async function start() {
-    ensureElements()
+    const el = ensureEl()
     if (!currentUrl) await renderNow()
-    elA!.volume = volume.value
-    elB!.volume = volume.value
-    // iOS unlock: a play() initiated outside a user gesture is normally
-    // blocked. We can prime elB inside this gesture so the timeupdate-driven
-    // handoff can start it later automatically.
-    if (!primed) {
-      try {
-        const savedVol = elB!.volume
-        elB!.volume = 0
-        await elB!.play()
-        elB!.pause()
-        elB!.currentTime = 0
-        elB!.volume = savedVol
-        primed = true
-      } catch { /* unlock isn't critical, ended handler will still fire */ }
-    }
-    current = elA
-    elA!.currentTime = 0
+    el.volume = volume.value
     try {
-      await elA!.play()
+      await el.play()
       playing.value = true
     } catch (err) {
       console.warn('play() failed', err)
@@ -312,16 +220,9 @@ export function useNoise() {
   }
 
   function stop() {
+    audioEl?.pause()
+    if (audioEl) audioEl.currentTime = 0
     playing.value = false
-    if (fadeRaf !== null) {
-      cancelAnimationFrame(fadeRaf)
-      fadeRaf = null
-    }
-    elA?.pause()
-    elB?.pause()
-    if (elA) { elA.currentTime = 0; elA.volume = volume.value }
-    if (elB) { elB.currentTime = 0; elB.volume = volume.value }
-    current = null
   }
 
   async function toggle() {
@@ -337,28 +238,21 @@ export function useNoise() {
 
   function setEq(band: keyof EqState, gain: number) {
     eq[band].gain = gain
-    // Long debounce — rendering 10 min takes a second or two on mobile, so we
-    // wait until the user has settled on a value before regenerating.
     scheduleRender(800)
   }
 
   function setVolume(v: number) {
     volume.value = v
-    if (elA) elA.volume = v
-    if (elB) elB.volume = v
+    if (audioEl) audioEl.volume = v
   }
 
   onScopeDispose(() => {
     if (pendingTimer) clearTimeout(pendingTimer)
-    if (fadeRaf !== null) cancelAnimationFrame(fadeRaf)
-    for (const el of [elA, elB]) {
-      if (!el) continue
-      el.pause()
-      el.src = ''
+    if (audioEl) {
+      audioEl.pause()
+      audioEl.src = ''
+      audioEl = null
     }
-    elA = null
-    elB = null
-    current = null
     if (currentUrl) {
       URL.revokeObjectURL(currentUrl)
       currentUrl = null
