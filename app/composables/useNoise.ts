@@ -67,6 +67,28 @@ function createRawNoise(ctx: BaseAudioContext, opts: NoiseOptions) {
   return buf
 }
 
+// Smooths the loop seam: 400 ms equal-power fade in at the buffer start, same
+// at the end. Cheaper than a true wrap-around crossfade and the brief quiet
+// moment every 10 min feels like a breath rather than a click.
+const LOOP_FADE_SEC = 0.4
+
+function applyLoopFade(buffer: AudioBuffer) {
+  const fadeSamples = Math.min(
+    Math.floor(LOOP_FADE_SEC * buffer.sampleRate),
+    Math.floor(buffer.length / 2)
+  )
+  if (fadeSamples <= 1) return
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    const data = buffer.getChannelData(ch)
+    const N = data.length
+    for (let i = 0; i < fadeSamples; i++) {
+      const gain = Math.sin((i / fadeSamples) * (Math.PI / 2))
+      data[i] *= gain
+      data[N - 1 - i] *= gain
+    }
+  }
+}
+
 async function renderWithEq(opts: NoiseOptions, eq: EqState): Promise<AudioBuffer> {
   const length = Math.floor(opts.durationSec * opts.sampleRate)
   const offline = new OfflineAudioContext(NUM_CHANNELS, length, opts.sampleRate)
@@ -93,7 +115,9 @@ async function renderWithEq(opts: NoiseOptions, eq: EqState): Promise<AudioBuffe
 
   src.connect(low).connect(mid).connect(high).connect(offline.destination)
   src.start(0)
-  return await offline.startRendering()
+  const rendered = await offline.startRendering()
+  applyLoopFade(rendered)
+  return rendered
 }
 
 function audioBufferToWav(buffer: AudioBuffer): Blob {
@@ -259,6 +283,12 @@ export function useNoise() {
     }
   }
 
+  function setPlaybackState(state: MediaSessionPlaybackState) {
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = state
+    }
+  }
+
   async function start() {
     const el = ensureEl()
     if (!currentUrl) await renderNow()
@@ -266,6 +296,7 @@ export function useNoise() {
     try {
       await el.play()
       playing.value = true
+      setPlaybackState('playing')
       startResumeWatchers()
     } catch (err) {
       console.warn('play() failed', err)
@@ -278,6 +309,7 @@ export function useNoise() {
     audioEl?.pause()
     if (audioEl) audioEl.currentTime = 0
     playing.value = false
+    setPlaybackState('paused')
   }
 
   async function toggle() {
@@ -337,6 +369,19 @@ export function useNoise() {
     document.addEventListener('visibilitychange', tryResume)
     window.addEventListener('focus', tryResume)
     window.addEventListener('pageshow', tryResume)
+
+    // Lock-screen / control-center play+pause. Without explicit handlers iOS
+    // only knows how to pause our <audio> element — it can't restart it.
+    if ('mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: 'Noise',
+          artist: 'Noise Generator'
+        })
+      } catch { /* MediaMetadata may not be available */ }
+      navigator.mediaSession.setActionHandler('play',  () => { void start() })
+      navigator.mediaSession.setActionHandler('pause', () => { stop() })
+    }
   })
 
   onScopeDispose(() => {
@@ -347,6 +392,12 @@ export function useNoise() {
       document.removeEventListener('visibilitychange', tryResume)
       window.removeEventListener('focus', tryResume)
       window.removeEventListener('pageshow', tryResume)
+    }
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.setActionHandler('play', null)
+        navigator.mediaSession.setActionHandler('pause', null)
+      } catch { /* ignore */ }
     }
     if (audioEl) {
       audioEl.pause()
