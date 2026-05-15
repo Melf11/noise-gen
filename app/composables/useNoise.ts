@@ -289,25 +289,38 @@ export function useNoise() {
     }
   }
 
-  async function start() {
-    const el = ensureEl()
-    if (!currentUrl) await renderNow()
-    el.volume = volume.value
-    try {
-      await el.play()
-      playing.value = true
-      setPlaybackState('playing')
-      startResumeWatchers()
-    } catch (err) {
-      console.warn('play() failed', err)
-      playing.value = false
+  // Synchronous play path used by the user-gesture handlers (button, lock
+  // screen, control center). Doing `await` before play() loses the gesture
+  // context on iOS, so we only fall back to async start() when we really need
+  // to render a buffer first.
+  function playLoaded(): boolean {
+    if (!audioEl || !currentUrl) return false
+    audioEl.volume = volume.value
+    const p = audioEl.play()
+    playing.value = true
+    setPlaybackState('playing')
+    startResumeWatchers()
+    if (p && typeof p.catch === 'function') {
+      p.catch((err) => {
+        console.warn('play() failed', err)
+        playing.value = false
+        setPlaybackState('paused')
+      })
     }
+    return true
+  }
+
+  async function start() {
+    ensureEl()
+    if (!currentUrl) await renderNow()
+    playLoaded()
   }
 
   function stop() {
     stopResumeWatchers()
     audioEl?.pause()
-    if (audioEl) audioEl.currentTime = 0
+    // Intentionally don't reset currentTime: doing so seems to deactivate the
+    // iOS audio session, after which lock-screen play can't reactivate it.
     playing.value = false
     setPlaybackState('paused')
   }
@@ -372,6 +385,8 @@ export function useNoise() {
 
     // Lock-screen / control-center play+pause. Without explicit handlers iOS
     // only knows how to pause our <audio> element — it can't restart it.
+    // Critical: the play handler must call audioEl.play() synchronously here
+    // so iOS treats the lock-screen tap as a valid user gesture.
     if ('mediaSession' in navigator) {
       try {
         navigator.mediaSession.metadata = new MediaMetadata({
@@ -379,7 +394,9 @@ export function useNoise() {
           artist: 'Noise Generator'
         })
       } catch { /* MediaMetadata may not be available */ }
-      navigator.mediaSession.setActionHandler('play',  () => { void start() })
+      navigator.mediaSession.setActionHandler('play', () => {
+        if (!playLoaded()) void start()
+      })
       navigator.mediaSession.setActionHandler('pause', () => { stop() })
     }
   })
