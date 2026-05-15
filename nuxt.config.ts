@@ -40,7 +40,7 @@ export default defineNuxtConfig({
   },
 
   pwa: {
-    registerType: 'autoUpdate',
+    registerType: 'prompt',
     injectRegister: 'auto',
     manifest: {
       id: '/noise-gen/',

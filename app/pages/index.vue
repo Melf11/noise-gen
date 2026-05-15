@@ -3,6 +3,30 @@ import { useNoise, type NoiseType } from '~/composables/useNoise'
 
 const { type, eq, volume, playing, rendering, toggle, setType, setEq, setVolume } = useNoise()
 
+// Service worker update flow: needRefresh flips true once a newer SW has
+// installed and is waiting to take over. useRegisterSW touches `window`, so
+// we only invoke it once we know we're on the client. Periodic update() poll
+// keeps the banner showing up even if the app is open for hours.
+const needRefresh = ref(false)
+let updateSW: ((reload?: boolean) => Promise<void>) | null = null
+
+onMounted(() => {
+  const r = useRegisterSW({
+    immediate: true,
+    onRegisteredSW(_swUrl, registration) {
+      if (registration) {
+        setInterval(() => { void registration.update() }, 60_000)
+      }
+    }
+  })
+  watchEffect(() => { needRefresh.value = r.needRefresh.value })
+  updateSW = r.updateServiceWorker
+})
+
+function applyUpdate() {
+  if (updateSW) void updateSW(true)
+}
+
 const noiseTypes: { id: NoiseType; label: string }[] = [
   { id: 'white', label: 'White' },
   { id: 'pink',  label: 'Pink' },
@@ -27,6 +51,19 @@ function fmtDb(v: number) {
       <h1 class="text-2xl font-semibold tracking-tight">Noise</h1>
       <p class="text-sm text-zinc-500 mt-1">Hintergrundgeräusche mit EQ</p>
     </header>
+
+    <div
+      v-if="needRefresh"
+      class="mb-8 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3"
+    >
+      <span class="text-sm text-emerald-300">Neue Version verfügbar</span>
+      <button
+        @click="applyUpdate"
+        class="rounded-md bg-emerald-500 px-3 py-1.5 text-xs font-semibold text-zinc-950 active:bg-emerald-400"
+      >
+        Update
+      </button>
+    </div>
 
     <section class="mb-8">
       <div class="text-xs uppercase tracking-wider text-zinc-500 mb-3">Typ</div>
