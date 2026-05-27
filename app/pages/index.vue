@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useNoise, type NoiseType } from '~/composables/useNoise'
+import { useRegisterSW } from 'virtual:pwa-register/vue'
 
 const { type, eq, volume, playing, rendering, toggle, setType, setEq, setVolume } = useNoise()
 

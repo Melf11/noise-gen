@@ -62,7 +62,7 @@ export default defineNuxtConfig({
     },
     workbox: {
       navigateFallback: '/noise-gen/',
-      globPatterns: ['**/*.{js,css,html,png,svg,ico,webmanifest,json}'],
+      globPatterns: ['**/*.{js,css,html,png,svg,ico,webmanifest,json,worklet.js}'],
       cleanupOutdatedCaches: true
     },
     devOptions: {
