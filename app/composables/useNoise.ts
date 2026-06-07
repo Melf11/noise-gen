@@ -222,10 +222,12 @@ export function useNoise() {
 
   function stop() {
     stopResumeWatchers()
+    // Only silence the worklet (active=0 outputs zeros) — deliberately keep the
+    // <audio> element playing. On iOS, pausing a media element whose srcObject is
+    // a MediaStream makes it impossible to resume: a later play() produces no
+    // sound until the app is fully restarted. Leaving the stream running means
+    // play just flips `active` back on.
     setNoiseActive(false)
-    audioEl?.pause()
-    // Intentionally don't reset currentTime: doing so seems to deactivate the
-    // iOS audio session, after which lock-screen play can't reactivate it.
     playing.value = false
     setPlaybackState('paused')
   }
