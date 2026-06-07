@@ -84,6 +84,10 @@ export function useNoise() {
   let initPromise: Promise<void> | null = null
   let saveTimer: ReturnType<typeof setTimeout> | null = null
   let resumeTimer: ReturnType<typeof setInterval> | null = null
+  // True while another audio session holds an iOS interruption (phone call, a
+  // voice message playing in another app). We must stay silent and not grab the
+  // audio focus back until iOS reports the interruption has ended.
+  let interrupted = false
 
   function ensureEl() {
     if (audioEl) return audioEl
@@ -143,6 +147,11 @@ export function useNoise() {
         graph = { ctx, noise, low, mid, high, gain, dest }
         syncGraphParams()
 
+        // iOS surfaces interruptions (calls, other apps' audio) as an
+        // 'interrupted' AudioContext state. Track it so we yield the audio
+        // focus instead of fighting to reclaim it.
+        ctx.addEventListener('statechange', onCtxStateChange)
+
         const el = ensureEl()
         el.srcObject = dest.stream
       } finally {
@@ -158,9 +167,31 @@ export function useNoise() {
     graph.noise.parameters.get('active')!.value = active ? 1 : 0
   }
 
+  // iOS reports interruptions via the AudioContext state machine: it flips to
+  // 'interrupted' while another audio session is active and back to 'suspended'
+  // once that session ends. We use this to let foreign audio (e.g. a Telegram
+  // voice message) play through to the end, then bring the noise back.
+  function onCtxStateChange() {
+    if (!graph) return
+    const state = graph.ctx.state as AudioContextState | 'interrupted'
+    if (state === 'interrupted') {
+      interrupted = true
+      return
+    }
+    if (interrupted) {
+      interrupted = false
+      // The interrupting audio finished — resume the noise where we left off.
+      if (playing.value) tryResume()
+    }
+  }
+
   // Try to resume after an audio session interruption (incoming call, etc.).
   function tryResume() {
     if (!playing.value || !audioEl || !graph) return
+
+    // Another audio session is currently playing — stay out of the way so it
+    // can finish instead of being cut short by us reclaiming the focus.
+    if (interrupted || (graph.ctx.state as string) === 'interrupted') return
 
     if (graph.ctx.state === 'suspended') {
       void graph.ctx.resume()
@@ -195,6 +226,8 @@ export function useNoise() {
   function playLoaded(): boolean {
     if (!audioEl || !graph) return false
 
+    // Explicit user intent to play overrides any stale interruption state.
+    interrupted = false
     syncGraphParams()
     setNoiseActive(true)
     void graph.ctx.resume()
