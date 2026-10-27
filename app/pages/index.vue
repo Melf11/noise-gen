@@ -28,11 +28,14 @@ onMounted(() => {
 })
 
 // Open the app with #debug to see the playback event log (for diagnosing iOS).
-const showDebug = ref(false)
+// Read the hash via the router: during hydration it briefly strips the hash
+// from window.location, so checking that in onMounted misses it. Gated on
+// mount so the prerendered HTML (which has no hash) still hydrates cleanly.
+const route = useRoute()
+const mounted = ref(false)
+const showDebug = computed(() => mounted.value && route.hash === '#debug')
 
-onMounted(() => {
-  showDebug.value = window.location.hash === '#debug'
-})
+onMounted(() => { mounted.value = true })
 
 function applyUpdate() {
   if (updateSW) void updateSW(true)
