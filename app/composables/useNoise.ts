@@ -115,6 +115,7 @@ export function useNoise() {
   let resumeTimer: ReturnType<typeof setInterval> | null = null
   let sleepTick: ReturnType<typeof setInterval> | null = null
   let lastRestart = 0
+  let workletLoaded = false
   // True while another audio session holds an iOS interruption (phone call, a
   // voice message playing in another app). We must stay silent and not grab the
   // audio focus back until iOS reports the interruption has ended.
@@ -166,9 +167,12 @@ export function useNoise() {
 
     const g: AudioGraph = { ctx, noise: null, low, mid, high, gain, fade, dest, el, started: false }
 
-    rendering.value = true
+    // Only the first load is slow enough to be worth a "loading" state; later
+    // rebuilds hit the cached module and would just flicker the button.
+    if (!workletLoaded) rendering.value = true
     ctx.audioWorklet.addModule(workletModuleUrl())
       .then(() => {
+        workletLoaded = true
         if (graph !== g) return
         g.noise = new AudioWorkletNode(ctx, 'noise-processor', {
           numberOfInputs: 0,
@@ -418,17 +422,21 @@ export function useNoise() {
 
   function stop() {
     stopResumeWatchers()
-    // Only silence the worklet (active=0 outputs zeros) — deliberately keep the
-    // <audio> element playing. On iOS, pausing a media element whose srcObject is
-    // a MediaStream makes it impossible to resume: a later play() produces no
-    // sound until the app is fully restarted. Leaving the stream running means
-    // play just flips `active` back on.
     playing.value = false
-    syncGraphParams()
     stalled.value = false
-    setPlaybackState('paused')
     // The chosen timer stays armed and counts down afresh on the next play.
     stopSleepCountdown()
+    // Tear the graph down so iOS really ends playback: the lock screen and
+    // Control Centre show it stopped and the audio session is released (just
+    // silencing the worklet would leave the element "playing"). A paused
+    // MediaStream-backed element can't be restarted on iOS, so swap in a fresh,
+    // unstarted graph for the next play.
+    if (graph?.started) {
+      destroyGraph(graph)
+      graph = buildGraph()
+    }
+    syncGraphParams()
+    setPlaybackState('paused')
   }
 
   function toggle() {
