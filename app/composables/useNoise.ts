@@ -4,6 +4,9 @@
 
 export type NoiseType = 'white' | 'pink' | 'brown'
 
+/** 'end' fades over the last SLEEP_FADE_SEC, 'full' over the whole countdown. */
+export type SleepFade = 'end' | 'full'
+
 export interface EqBand {
   /** dB, -12 .. +12 */
   gain: number
@@ -17,10 +20,15 @@ export interface EqState {
 
 const STORAGE_KEY = 'noise-gen:settings'
 
+/** Length of the sleep-timer fade-out at the end of the countdown. */
+const SLEEP_FADE_SEC = 30
+
 interface StoredSettings {
   type?: NoiseType
   eq?: { low?: number; mid?: number; high?: number }
   volume?: number
+  sleepMinutes?: number
+  sleepFade?: SleepFade
 }
 
 interface AudioGraph {
@@ -30,6 +38,8 @@ interface AudioGraph {
   mid: BiquadFilterNode
   high: BiquadFilterNode
   gain: GainNode
+  /** Sleep-timer fade, kept separate so volume changes don't clobber its automation. */
+  fade: GainNode
   dest: MediaStreamAudioDestinationNode
 }
 
@@ -78,12 +88,22 @@ export function useNoise() {
   const volume = ref(0.7)
   const playing = ref(false)
   const rendering = ref(false)
+  /** Chosen sleep-timer length in minutes, 0 = off. */
+  const sleepMinutes = ref(0)
+  const sleepFade = ref<SleepFade>('end')
+  /** Wall-clock deadline (ms) while the countdown runs; null while armed-but-stopped or off. */
+  const sleepEndsAt = ref<number | null>(null)
+  const now = ref(Date.now())
+  const sleepRemaining = computed(() =>
+    sleepEndsAt.value === null ? 0 : Math.max(0, sleepEndsAt.value - now.value)
+  )
 
   let audioEl: HTMLAudioElement | null = null
   let graph: AudioGraph | null = null
   let initPromise: Promise<void> | null = null
   let saveTimer: ReturnType<typeof setTimeout> | null = null
   let resumeTimer: ReturnType<typeof setInterval> | null = null
+  let sleepTick: ReturnType<typeof setInterval> | null = null
   // True while another audio session holds an iOS interruption (phone call, a
   // voice message playing in another app). We must stay silent and not grab the
   // audio focus back until iOS reports the interruption has ended.
@@ -140,11 +160,12 @@ export function useNoise() {
         high.frequency.value = 4000
 
         const gain = ctx.createGain()
+        const fade = ctx.createGain()
         const dest = ctx.createMediaStreamDestination()
 
-        noise.connect(low).connect(mid).connect(high).connect(gain).connect(dest)
+        noise.connect(low).connect(mid).connect(high).connect(gain).connect(fade).connect(dest)
 
-        graph = { ctx, noise, low, mid, high, gain, dest }
+        graph = { ctx, noise, low, mid, high, gain, fade, dest }
         syncGraphParams()
 
         // iOS surfaces interruptions (calls, other apps' audio) as an
@@ -181,12 +202,18 @@ export function useNoise() {
     if (interrupted) {
       interrupted = false
       // The interrupting audio finished — resume the noise where we left off.
-      if (playing.value) tryResume()
+      // The audio clock was paused meanwhile, so realign the fade with the
+      // wall-clock deadline.
+      if (playing.value) {
+        scheduleSleepFade()
+        tryResume()
+      }
     }
   }
 
   // Try to resume after an audio session interruption (incoming call, etc.).
   function tryResume() {
+    checkSleepTimer()
     if (!playing.value || !audioEl || !graph) return
 
     // Another audio session is currently playing — stay out of the way so it
@@ -216,6 +243,66 @@ export function useNoise() {
     }
   }
 
+  // The fade is scheduled on the audio clock rather than driven from JS: iOS
+  // throttles timers in a backgrounded PWA, but AudioParam automation keeps
+  // running, so the noise reliably reaches silence at the deadline.
+  function scheduleSleepFade() {
+    if (!graph || sleepEndsAt.value === null) return
+    const { ctx, fade } = graph
+    const t = ctx.currentTime
+    const remaining = Math.max(0, (sleepEndsAt.value - Date.now()) / 1000)
+    const end = t + remaining
+    const fadeLen = sleepFade.value === 'full' ? sleepMinutes.value * 60 : SLEEP_FADE_SEC
+    const fadeStart = Math.max(t, end - fadeLen)
+    // Pick up at the level the ramp should be at now, in case we're already mid-fade.
+    const level = fadeLen > 0 ? Math.min(1, remaining / fadeLen) : 0
+    fade.gain.cancelScheduledValues(t)
+    fade.gain.setValueAtTime(level, t)
+    fade.gain.setValueAtTime(level, fadeStart)
+    fade.gain.linearRampToValueAtTime(0, end)
+  }
+
+  function resetSleepFade() {
+    if (!graph) return
+    const { ctx, fade } = graph
+    fade.gain.cancelScheduledValues(ctx.currentTime)
+    fade.gain.setValueAtTime(1, ctx.currentTime)
+  }
+
+  function checkSleepTimer() {
+    now.value = Date.now()
+    if (sleepEndsAt.value !== null && now.value >= sleepEndsAt.value) stop()
+  }
+
+  function startSleepCountdown() {
+    if (sleepMinutes.value <= 0) return
+    sleepEndsAt.value = Date.now() + sleepMinutes.value * 60_000
+    now.value = Date.now()
+    scheduleSleepFade()
+    if (sleepTick === null) sleepTick = setInterval(checkSleepTimer, 1000)
+  }
+
+  function stopSleepCountdown() {
+    if (sleepTick !== null) {
+      clearInterval(sleepTick)
+      sleepTick = null
+    }
+    sleepEndsAt.value = null
+    resetSleepFade()
+  }
+
+  /** Arm the sleep timer (0 = off). Counts down right away if playing, otherwise from the next play. */
+  function setSleepTimer(minutes: number) {
+    stopSleepCountdown()
+    sleepMinutes.value = minutes
+    if (playing.value) startSleepCountdown()
+  }
+
+  function setSleepFade(f: SleepFade) {
+    sleepFade.value = f
+    if (playing.value) scheduleSleepFade()
+  }
+
   function setPlaybackState(state: MediaSessionPlaybackState) {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = state
@@ -236,6 +323,7 @@ export function useNoise() {
     playing.value = true
     setPlaybackState('playing')
     startResumeWatchers()
+    if (sleepEndsAt.value === null) startSleepCountdown()
 
     if (p && typeof p.catch === 'function') {
       p.catch((err) => {
@@ -263,6 +351,8 @@ export function useNoise() {
     setNoiseActive(false)
     playing.value = false
     setPlaybackState('paused')
+    // The chosen timer stays armed and counts down afresh on the next play.
+    stopSleepCountdown()
   }
 
   async function toggle() {
@@ -293,7 +383,9 @@ export function useNoise() {
       writeStored({
         type: type.value,
         eq: { low: eq.low.gain, mid: eq.mid.gain, high: eq.high.gain },
-        volume: volume.value
+        volume: volume.value,
+        sleepMinutes: sleepMinutes.value,
+        sleepFade: sleepFade.value
       })
     }, 250)
   }
@@ -312,12 +404,18 @@ export function useNoise() {
       if (typeof stored.volume === 'number' && stored.volume >= 0 && stored.volume <= 1) {
         volume.value = stored.volume
       }
+      if (typeof stored.sleepMinutes === 'number' && stored.sleepMinutes >= 0 && stored.sleepMinutes <= 24 * 60) {
+        sleepMinutes.value = stored.sleepMinutes
+      }
+      if (stored.sleepFade === 'end' || stored.sleepFade === 'full') {
+        sleepFade.value = stored.sleepFade
+      }
     }
 
     void ensureGraph()
 
     watch(
-      [type, () => eq.low.gain, () => eq.mid.gain, () => eq.high.gain, volume],
+      [type, () => eq.low.gain, () => eq.mid.gain, () => eq.high.gain, volume, sleepMinutes, sleepFade],
       scheduleSave
     )
 
@@ -342,6 +440,7 @@ export function useNoise() {
   onScopeDispose(() => {
     if (saveTimer) clearTimeout(saveTimer)
     stopResumeWatchers()
+    if (sleepTick !== null) clearInterval(sleepTick)
     if (typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', tryResume)
       window.removeEventListener('focus', tryResume)
@@ -371,11 +470,16 @@ export function useNoise() {
     volume,
     playing,
     rendering,
+    sleepMinutes,
+    sleepFade,
+    sleepRemaining,
     start,
     stop,
     toggle,
     setType,
     setEq,
-    setVolume
+    setVolume,
+    setSleepTimer,
+    setSleepFade
   }
 }

@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { useNoise, type NoiseType } from '~/composables/useNoise'
+import { useNoise, type NoiseType, type SleepFade } from '~/composables/useNoise'
 import { useRegisterSW } from 'virtual:pwa-register/vue'
 
-const { type, eq, volume, playing, rendering, toggle, setType, setEq, setVolume } = useNoise()
+const {
+  type, eq, volume, playing, rendering, sleepMinutes, sleepFade, sleepRemaining,
+  toggle, setType, setEq, setVolume, setSleepTimer, setSleepFade
+} = useNoise()
 
 // Service worker update flow: needRefresh flips true once a newer SW has
 // installed and is waiting to take over. useRegisterSW touches `window`, so
@@ -39,6 +42,21 @@ const bands: { key: 'low' | 'mid' | 'high'; label: string; hz: string }[] = [
   { key: 'mid',  label: 'Mid',  hz: '1 kHz' },
   { key: 'high', label: 'High', hz: '4 kHz' }
 ]
+
+const sleepOptions = [0, 5, 10, 15, 30, 45, 60, 90]
+
+const fadeOptions: { id: SleepFade; label: string }[] = [
+  { id: 'end',  label: 'Letzte 30 s' },
+  { id: 'full', label: 'Ganze Dauer' }
+]
+
+function fmtRemaining(ms: number) {
+  const total = Math.ceil(ms / 1000)
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = String(total % 60).padStart(2, '0')
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`
+}
 
 function fmtDb(v: number) {
   if (v === 0) return '0 dB'
@@ -105,7 +123,7 @@ function fmtDb(v: number) {
       </div>
     </section>
 
-    <section class="mb-10">
+    <section class="mb-8">
       <div class="flex justify-between items-baseline mb-1.5">
         <span class="text-xs uppercase tracking-wider text-zinc-500">Lautstärke</span>
         <span class="text-xs tabular-nums text-zinc-400">{{ Math.round(volume * 100) }}%</span>
@@ -118,6 +136,49 @@ function fmtDb(v: number) {
         :value="volume"
         @input="(e) => setVolume(Number((e.target as HTMLInputElement).value))"
       />
+    </section>
+
+    <section class="mb-10">
+      <div class="flex justify-between items-baseline mb-3">
+        <span class="text-xs uppercase tracking-wider text-zinc-500">Einschlaftimer</span>
+        <span class="text-xs tabular-nums text-zinc-400">
+          <template v-if="sleepRemaining > 0">noch {{ fmtRemaining(sleepRemaining) }}</template>
+          <template v-else-if="sleepMinutes > 0">startet mit Play</template>
+        </span>
+      </div>
+      <div class="grid grid-cols-4 gap-2">
+        <button
+          v-for="m in sleepOptions"
+          :key="m"
+          @click="setSleepTimer(m)"
+          :class="[
+            'rounded-xl py-2.5 text-sm font-medium border transition-colors tabular-nums',
+            sleepMinutes === m
+              ? 'bg-zinc-100 text-zinc-900 border-zinc-100'
+              : 'bg-zinc-900 text-zinc-300 border-zinc-800 active:bg-zinc-800'
+          ]"
+        >
+          {{ m === 0 ? 'Aus' : m }}
+        </button>
+      </div>
+      <div class="flex items-center gap-3 mt-4">
+        <span class="text-xs text-zinc-500 shrink-0">Ausblenden</span>
+        <div class="grid grid-cols-2 gap-2 flex-1">
+          <button
+            v-for="f in fadeOptions"
+            :key="f.id"
+            @click="setSleepFade(f.id)"
+            :class="[
+              'rounded-lg py-2 text-xs font-medium border transition-colors',
+              sleepFade === f.id
+                ? 'bg-zinc-100 text-zinc-900 border-zinc-100'
+                : 'bg-zinc-900 text-zinc-300 border-zinc-800 active:bg-zinc-800'
+            ]"
+          >
+            {{ f.label }}
+          </button>
+        </div>
+      </div>
     </section>
 
     <div class="mt-auto">
