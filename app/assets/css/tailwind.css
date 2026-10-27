@@ -18,6 +18,13 @@ body {
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
+/* Pointless once the app is already installed to the home screen. */
+@media (display-mode: standalone) {
+  .install-hint {
+    display: none;
+  }
+}
+
 input[type='range'] {
   -webkit-appearance: none;
   appearance: none;

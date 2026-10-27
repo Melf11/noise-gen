@@ -3,7 +3,7 @@ import { useNoise, type NoiseType, type SleepFade } from '~/composables/useNoise
 import { useRegisterSW } from 'virtual:pwa-register/vue'
 
 const {
-  type, eq, volume, playing, rendering, sleepMinutes, sleepFade, sleepRemaining,
+  type, eq, volume, playing, stalled, rendering, sleepMinutes, sleepFade, sleepRemaining, debugLog,
   toggle, setType, setEq, setVolume, setSleepTimer, setSleepFade
 } = useNoise()
 
@@ -25,6 +25,13 @@ onMounted(() => {
   })
   watchEffect(() => { needRefresh.value = r.needRefresh.value })
   updateSW = r.updateServiceWorker
+})
+
+// Open the app with #debug to see the playback event log (for diagnosing iOS).
+const showDebug = ref(false)
+
+onMounted(() => {
+  showDebug.value = window.location.hash === '#debug'
 })
 
 function applyUpdate() {
@@ -65,15 +72,15 @@ function fmtDb(v: number) {
 </script>
 
 <template>
-  <div class="min-h-full flex flex-col items-stretch px-6 pt-8 pb-10 max-w-md mx-auto w-full">
-    <header class="mb-10">
+  <div class="min-h-full flex flex-col items-stretch px-5 pt-4 pb-5 max-w-md mx-auto w-full">
+    <header class="mb-5 flex items-baseline gap-3">
       <h1 class="text-2xl font-semibold tracking-tight">Noise</h1>
-      <p class="text-sm text-zinc-500 mt-1">Hintergrundgeräusche mit EQ</p>
+      <p class="text-sm text-zinc-500">Hintergrundgeräusche mit EQ</p>
     </header>
 
     <div
       v-if="needRefresh"
-      class="mb-8 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3"
+      class="mb-5 flex items-center justify-between gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3"
     >
       <span class="text-sm text-emerald-300">Neue Version verfügbar</span>
       <button
@@ -84,15 +91,15 @@ function fmtDb(v: number) {
       </button>
     </div>
 
-    <section class="mb-8">
-      <div class="text-xs uppercase tracking-wider text-zinc-500 mb-3">Typ</div>
+    <section class="mb-5">
+      <div class="text-xs uppercase tracking-wider text-zinc-500 mb-2">Typ</div>
       <div class="grid grid-cols-3 gap-2">
         <button
           v-for="n in noiseTypes"
           :key="n.id"
           @click="setType(n.id)"
           :class="[
-            'rounded-xl py-3 text-sm font-medium border transition-colors',
+            'rounded-xl py-2.5 text-sm font-medium border transition-colors',
             type === n.id
               ? 'bg-zinc-100 text-zinc-900 border-zinc-100'
               : 'bg-zinc-900 text-zinc-300 border-zinc-800 active:bg-zinc-800'
@@ -103,11 +110,11 @@ function fmtDb(v: number) {
       </div>
     </section>
 
-    <section class="mb-8">
-      <div class="text-xs uppercase tracking-wider text-zinc-500 mb-3">EQ</div>
-      <div class="space-y-5">
+    <section class="mb-5">
+      <div class="text-xs uppercase tracking-wider text-zinc-500 mb-2">EQ</div>
+      <div class="space-y-2">
         <div v-for="b in bands" :key="b.key">
-          <div class="flex justify-between items-baseline mb-1.5">
+          <div class="flex justify-between items-baseline">
             <span class="text-sm">{{ b.label }} <span class="text-zinc-600 text-xs ml-1">{{ b.hz }}</span></span>
             <span class="text-xs tabular-nums text-zinc-400">{{ fmtDb(eq[b.key].gain) }}</span>
           </div>
@@ -123,8 +130,8 @@ function fmtDb(v: number) {
       </div>
     </section>
 
-    <section class="mb-8">
-      <div class="flex justify-between items-baseline mb-1.5">
+    <section class="mb-5">
+      <div class="flex justify-between items-baseline">
         <span class="text-xs uppercase tracking-wider text-zinc-500">Lautstärke</span>
         <span class="text-xs tabular-nums text-zinc-400">{{ Math.round(volume * 100) }}%</span>
       </div>
@@ -138,21 +145,21 @@ function fmtDb(v: number) {
       />
     </section>
 
-    <section class="mb-10">
-      <div class="flex justify-between items-baseline mb-3">
+    <section class="mb-6">
+      <div class="flex justify-between items-baseline mb-2">
         <span class="text-xs uppercase tracking-wider text-zinc-500">Einschlaftimer</span>
         <span class="text-xs tabular-nums text-zinc-400">
           <template v-if="sleepRemaining > 0">noch {{ fmtRemaining(sleepRemaining) }}</template>
           <template v-else-if="sleepMinutes > 0">startet mit Play</template>
         </span>
       </div>
-      <div class="grid grid-cols-4 gap-2">
+      <div class="grid grid-cols-8 gap-1.5">
         <button
           v-for="m in sleepOptions"
           :key="m"
           @click="setSleepTimer(m)"
           :class="[
-            'rounded-xl py-2.5 text-sm font-medium border transition-colors tabular-nums',
+            'rounded-lg py-2 text-sm font-medium border transition-colors tabular-nums',
             sleepMinutes === m
               ? 'bg-zinc-100 text-zinc-900 border-zinc-100'
               : 'bg-zinc-900 text-zinc-300 border-zinc-800 active:bg-zinc-800'
@@ -161,7 +168,7 @@ function fmtDb(v: number) {
           {{ m === 0 ? 'Aus' : m }}
         </button>
       </div>
-      <div class="flex items-center gap-3 mt-4">
+      <div class="flex items-center gap-3 mt-2">
         <span class="text-xs text-zinc-500 shrink-0">Ausblenden</span>
         <div class="grid grid-cols-2 gap-2 flex-1">
           <button
@@ -185,19 +192,24 @@ function fmtDb(v: number) {
       <button
         @click="toggle"
         :class="[
-          'w-full rounded-2xl py-5 text-base font-semibold transition-colors',
-          playing
+          'w-full rounded-2xl py-4 text-base font-semibold transition-colors',
+          playing && !stalled
             ? 'bg-zinc-100 text-zinc-900 active:bg-zinc-300'
             : 'bg-emerald-500 text-zinc-950 active:bg-emerald-400'
         ]"
       >
         <span v-if="rendering && !playing">Lade…</span>
+        <span v-else-if="stalled">Fortsetzen</span>
         <span v-else-if="playing">Stop</span>
         <span v-else>Play</span>
       </button>
-      <p class="text-center text-xs text-zinc-600 mt-3">
+      <p class="install-hint text-center text-xs text-zinc-600 mt-3">
         Auf iPhone: Teilen → „Zum Home-Bildschirm“ für Offline-Nutzung
       </p>
+      <pre
+        v-if="showDebug"
+        class="mt-6 max-h-64 overflow-auto rounded-lg bg-zinc-900 p-3 text-[10px] leading-relaxed text-zinc-400 select-text whitespace-pre-wrap"
+      >{{ debugLog.join('\n') || 'Noch keine Ereignisse' }}</pre>
     </div>
   </div>
 </template>
