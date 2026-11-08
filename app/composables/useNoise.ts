@@ -23,6 +23,9 @@ const STORAGE_KEY = 'noise-gen:settings'
 /** Length of the sleep-timer fade-out at the end of the countdown. */
 const SLEEP_FADE_SEC = 30
 
+/** Gain the sleep fade ramps down to before cutting to silence (-60 dB). */
+const SLEEP_FADE_FLOOR = 0.001
+
 /** Minimum gap between attempts to restart a paused <audio> element. */
 const RESTART_THROTTLE_MS = 3000
 
@@ -327,12 +330,19 @@ export function useNoise() {
     const end = t + remaining
     const fadeLen = sleepFade.value === 'full' ? sleepMinutes.value * 60 : SLEEP_FADE_SEC
     const fadeStart = Math.max(t, end - fadeLen)
+    // Exponential ramp = constant dB per second, which the ear hears as an even
+    // fade (a linear ramp barely changes for ages, then drops off at the end).
+    // It can't reach 0, so ramp down to SLEEP_FADE_FLOOR and cut from there.
     // Pick up at the level the ramp should be at now, in case we're already mid-fade.
-    const level = fadeLen > 0 ? Math.min(1, remaining / fadeLen) : 0
+    const progress = fadeLen > 0 ? Math.max(0, 1 - remaining / fadeLen) : 1
+    const level = Math.pow(SLEEP_FADE_FLOOR, progress)
     fade.gain.cancelScheduledValues(t)
     fade.gain.setValueAtTime(level, t)
-    fade.gain.setValueAtTime(level, fadeStart)
-    fade.gain.linearRampToValueAtTime(0, end)
+    if (end > t) {
+      fade.gain.setValueAtTime(level, fadeStart)
+      fade.gain.exponentialRampToValueAtTime(SLEEP_FADE_FLOOR, end)
+    }
+    fade.gain.setValueAtTime(0, end)
   }
 
   function resetSleepFade() {
